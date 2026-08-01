@@ -1,5 +1,5 @@
 diff --git a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
-index 53ad622..1f0c057 100644
+index 53ad622..a3c162b 100644
 --- a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
 +++ b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
 @@ -1,5 +1,6 @@
@@ -9,7 +9,22 @@ index 53ad622..1f0c057 100644
  import androidx.core.os.bundleOf
  import expo.modules.kotlin.modules.Module
  import expo.modules.kotlin.modules.ModuleDefinition
-@@ -21,6 +22,12 @@ class ExpoHttpServerModule : Module() {
+@@ -9,18 +10,26 @@ import com.safframework.server.core.http.HttpMethod
+ import com.safframework.server.core.http.Request
+ import com.safframework.server.core.http.Response
+ import org.json.JSONObject
++import java.io.File
+ 
+ class ExpoHttpServerModule : Module() {
+   class SimpleHttpResponse(val statusCode: Int,
+                            val statusDescription: String,
+                            val contentType: String,
+                            val headers: HashMap<String, String>,
+-                           val body: String)
++                           val body: String,
++                           val filePath: String? = null)
+ 
+   private var server: Server? = null;
    private var started = false;
    private val responses = HashMap<String, SimpleHttpResponse>()
  
@@ -22,7 +37,7 @@ index 53ad622..1f0c057 100644
    override fun definition() = ModuleDefinition {
  
      Name("ExpoHttpServer")
-@@ -53,13 +60,30 @@ class ExpoHttpServerModule : Module() {
+@@ -53,13 +62,41 @@ class ExpoHttpServerModule : Module() {
            Thread.sleep(10)
          }
          val res = responses[uuid]!!
@@ -31,7 +46,19 @@ index 53ad622..1f0c057 100644
 -        response.addHeader("Content-Length", "" + res.body.length)
 -        response.addHeader("Content-Type", res.contentType)
 +
-+        if (isTextContentType(res.contentType)) {
++        if (res.filePath != null) {
++          // Serve file directly from disk — no JS bridge needed
++          try {
++            val file = File(res.filePath)
++            val bytes = file.readBytes()
++            response.setBodyData(res.contentType, bytes)
++            response.addHeader("Content-Length", "" + bytes.size)
++          } catch (e: Exception) {
++            response.setStatus(500)
++            response.setBodyText("Error reading file: " + e.message)
++            response.addHeader("Content-Type", "text/plain")
++          }
++        } else if (isTextContentType(res.contentType)) {
 +          response.setBodyText(res.body)
 +          response.addHeader("Content-Type", res.contentType)
 +          response.addHeader("Content-Length", "" + res.body.toByteArray().size)
@@ -42,7 +69,6 @@ index 53ad622..1f0c057 100644
 +            response.setBodyData(res.contentType, bytes)
 +            response.addHeader("Content-Length", "" + bytes.size)
 +          } catch (e: Exception) {
-+            // Fallback to text if base64 decode fails
 +            response.setBodyText(res.body)
 +            response.addHeader("Content-Type", res.contentType)
 +            response.addHeader("Content-Length", "" + res.body.toByteArray().size)
@@ -56,3 +82,64 @@ index 53ad622..1f0c057 100644
          responses.remove(uuid);
          return@request response
        };
+@@ -92,6 +129,15 @@ class ExpoHttpServerModule : Module() {
+       responses[uuid] = SimpleHttpResponse(statusCode, statusDescription, contentType, headers, body);
+     }
+ 
++    // Respond with a file path — native reads the file directly, no JS bridge
++    Function("respondWithFile") { uuid: String,
++                                   statusCode: Int,
++                                   contentType: String,
++                                   headers: HashMap<String, String>,
++                                   filePath: String ->
++      responses[uuid] = SimpleHttpResponse(statusCode, "OK", contentType, headers, "", filePath);
++    }
++
+     Function("stop") {
+       started = false
+       server?.close()
+diff --git a/node_modules/expo-http-server/src/index.ts b/node_modules/expo-http-server/src/index.ts
+index da15689..8270220 100644
+--- a/node_modules/expo-http-server/src/index.ts
++++ b/node_modules/expo-http-server/src/index.ts
+@@ -32,6 +32,7 @@ export interface Response {
+   contentType?: string;
+   headers?: Record<string, string>;
+   body?: string;
++  filePath?: string;
+ }
+ 
+ export interface Callback {
+@@ -56,14 +57,24 @@ export const start = () => {
+       return;
+     }
+     const response = await responseHandler.callback(event);
+-    ExpoHttpServerModule.respond(
+-      event.uuid,
+-      response.statusCode || 200,
+-      response.statusDescription || "OK",
+-      response.contentType || "application/json",
+-      response.headers || {},
+-      response.body || "{}",
+-    );
++    if (response.filePath) {
++      ExpoHttpServerModule.respondWithFile(
++        event.uuid,
++        response.statusCode || 200,
++        response.contentType || "application/octet-stream",
++        response.headers || {},
++        response.filePath,
++      );
++    } else {
++      ExpoHttpServerModule.respond(
++        event.uuid,
++        response.statusCode || 200,
++        response.statusDescription || "OK",
++        response.contentType || "application/json",
++        response.headers || {},
++        response.body || "{}",
++      );
++    }
+   });
+   ExpoHttpServerModule.start();
+ };

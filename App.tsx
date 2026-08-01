@@ -270,16 +270,12 @@ ${mediaTag}
         return { statusCode: 404, contentType: 'text/plain', body: 'File not found' };
       }
 
-      // Copy SAF content:// URI to cache for reliable reading
+      // Copy SAF content:// URI to cache so native code can read it directly
       const cachePath = FileSystem.cacheDirectory + 'serve_' + file.name;
       await FileSystem.copyAsync({ from: file.uri, to: cachePath });
 
-      const fileContent = await FileSystem.readAsStringAsync(cachePath, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-
-      // Clean up cache copy
-      FileSystem.deleteAsync(cachePath, { idempotent: true }).catch(() => {});
+      // Strip file:// prefix — native needs a raw filesystem path
+      const nativePath = cachePath.replace('file://', '');
 
       const disposition = asDownload ? 'attachment' : 'inline';
       const contentType = asDownload ? 'application/octet-stream' : getMimeType(file.name);
@@ -290,7 +286,7 @@ ${mediaTag}
         headers: {
           'Content-Disposition': `${disposition}; filename="${file.name}"`,
         },
-        body: fileContent,
+        filePath: nativePath,
       };
     } catch (e) {
       console.error('Error serving file:', e);
