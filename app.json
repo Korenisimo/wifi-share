@@ -19,10 +19,6 @@
       },
       "package": "com.korenisimo.wifishare",
       "permissions": [
-        "READ_MEDIA_IMAGES",
-        "READ_MEDIA_VIDEO",
-        "READ_MEDIA_AUDIO",
-        "READ_EXTERNAL_STORAGE",
         "ACCESS_NETWORK_STATE",
         "ACCESS_WIFI_STATE",
         "FOREGROUND_SERVICE"
@@ -31,16 +27,7 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": [
-      [
-        "expo-media-library",
-        {
-          "photosPermission": "Allow WiFi Share to access your photos for sharing over WiFi.",
-          "savePhotosPermission": "Allow WiFi Share to save photos.",
-          "isAccessMediaLocationEnabled": true
-        }
-      ]
-    ],
+    "plugins": [],
     "extra": {
       "eas": {
         "projectId": "13a5fecf-7f69-4ae4-b9f6-b6164393bc30"
