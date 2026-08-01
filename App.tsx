@@ -270,9 +270,16 @@ ${mediaTag}
         return { statusCode: 404, contentType: 'text/plain', body: 'File not found' };
       }
 
-      const fileContent = await FileSystem.readAsStringAsync(file.uri, {
+      // Copy SAF content:// URI to cache for reliable reading
+      const cachePath = FileSystem.cacheDirectory + 'serve_' + file.name;
+      await FileSystem.copyAsync({ from: file.uri, to: cachePath });
+
+      const fileContent = await FileSystem.readAsStringAsync(cachePath, {
         encoding: FileSystem.EncodingType.Base64,
       });
+
+      // Clean up cache copy
+      FileSystem.deleteAsync(cachePath, { idempotent: true }).catch(() => {});
 
       const disposition = asDownload ? 'attachment' : 'inline';
       const contentType = asDownload ? 'application/octet-stream' : getMimeType(file.name);
@@ -287,7 +294,7 @@ ${mediaTag}
       };
     } catch (e) {
       console.error('Error serving file:', e);
-      return { statusCode: 500, contentType: 'text/plain', body: 'Error reading file' };
+      return { statusCode: 500, contentType: 'text/plain', body: 'Error reading file: ' + (e as Error).message };
     }
   };
 
