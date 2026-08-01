@@ -23,7 +23,7 @@ type FilterType = 'all' | 'video' | 'photo' | 'audio';
 export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [ipAddress, setIpAddress] = useState<string | null>(null);
-  const [port] = useState(8080);
+  const [port] = useState(9666);
   const [assets, setAssets] = useState<MediaAsset[]>([]);
   const [loading, setLoading] = useState(false);
   const [hasPermission, setHasPermission] = useState(false);
@@ -292,21 +292,24 @@ ${mediaTag}
   const startServer = async () => {
     try {
       await getIpAddress();
-      await server.setup(port, () => {
-        console.log(`Server started on port ${port}`);
+      server.setup(port, (event: { status: string }) => {
+        console.log(`Server event: ${event.status}`);
+        if (event.status === 'ERROR') {
+          Alert.alert('Error', 'Failed to start server. Try restarting the app.');
+        }
       });
-      await setupRoutes();
-      await server.start();
+      setupRoutes();
+      server.start();
       setIsRunning(true);
     } catch (e) {
       console.error('Failed to start server:', e);
-      Alert.alert('Error', 'Failed to start server. Try a different port or restart the app.');
+      Alert.alert('Error', 'Failed to start server. Try restarting the app.');
     }
   };
 
-  const stopServer = async () => {
+  const stopServer = () => {
     try {
-      await server.stop();
+      server.stop();
       setIsRunning(false);
     } catch (e) {
       console.error('Failed to stop server:', e);
