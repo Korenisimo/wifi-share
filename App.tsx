@@ -14,7 +14,8 @@ import { StatusBar } from 'expo-status-bar';
 import * as MediaLibrary from 'expo-media-library';
 import * as Network from 'expo-network';
 import * as FileSystem from 'expo-file-system';
-import { server } from 'expo-http-server';
+import { setup, start, stop, route } from 'expo-http-server';
+import type { RequestEvent } from 'expo-http-server';
 
 type MediaAsset = MediaLibrary.Asset;
 
@@ -140,10 +141,10 @@ export default function App() {
         return `
         <tr>
           <td>${icon}</td>
-          <td><a href="/file/${i}" target="_blank">${asset.filename}</a></td>
+          <td><a href="/file?index=${i}" target="_blank">${asset.filename}</a></td>
           <td>${duration}</td>
-          <td><a href="/download/${i}" class="btn">⬇ Download</a></td>
-          ${isVideo || isAudio ? `<td><a href="/stream/${i}" class="btn play">▶ Stream</a></td>` : `<td><a href="/file/${i}" class="btn play">👁 View</a></td>`}
+          <td><a href="/download?index=${i}" class="btn">⬇ Download</a></td>
+          ${isVideo || isAudio ? `<td><a href="/stream?index=${i}" class="btn play">▶ Stream</a></td>` : `<td><a href="/file?index=${i}" class="btn play">👁 View</a></td>`}
         </tr>`;
       })
       .join('');
@@ -182,8 +183,8 @@ ${rows}
   const generateStreamPage = (asset: MediaAsset, index: number): string => {
     const isVideo = asset.mediaType === 'video';
     const mediaTag = isVideo
-      ? `<video controls autoplay style="max-width:100%;max-height:80vh"><source src="/file/${index}" type="${getMimeType(asset.filename)}">Your browser does not support video.</video>`
-      : `<audio controls autoplay><source src="/file/${index}" type="${getMimeType(asset.filename)}">Your browser does not support audio.</audio>`;
+      ? `<video controls autoplay style="max-width:100%;max-height:80vh"><source src="/file?index=${index}" type="${getMimeType(asset.filename)}">Your browser does not support video.</video>`
+      : `<audio controls autoplay><source src="/file?index=${index}" type="${getMimeType(asset.filename)}">Your browser does not support audio.</audio>`;
 
     return `<!DOCTYPE html>
 <html><head>
@@ -202,84 +203,72 @@ ${mediaTag}
 </body></html>`;
   };
 
-  const setupRoutes = useCallback(async () => {
+  const parseIndex = (request: RequestEvent): number => {
+    // Try paramsJson (query params) first
+    try {
+      const params = JSON.parse(request.paramsJson || '{}');
+      if (params.index !== undefined) return parseInt(params.index);
+    } catch {}
+    // Fallback: parse query string from path
+    const match = request.path.match(/[?&]index=(\d+)/);
+    if (match) return parseInt(match[1]);
+    // Last fallback: last path segment
+    const parts = request.path.split('/');
+    return parseInt(parts[parts.length - 1] || '0');
+  };
+
+  const serveFile = async (request: RequestEvent, asDownload: boolean) => {
+    try {
+      const index = parseIndex(request);
+      const asset = assetsRef.current[index];
+      if (!asset) {
+        return { statusCode: 404, contentType: 'text/plain', body: 'File not found' };
+      }
+
+      const assetInfo = await MediaLibrary.getAssetInfoAsync(asset);
+      const uri = assetInfo.localUri || asset.uri;
+
+      if (!uri) {
+        return { statusCode: 404, contentType: 'text/plain', body: 'File URI not available' };
+      }
+
+      const fileContent = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      const disposition = asDownload ? 'attachment' : 'inline';
+      const contentType = asDownload ? 'application/octet-stream' : getMimeType(asset.filename);
+
+      return {
+        statusCode: 200,
+        contentType,
+        headers: {
+          'Content-Disposition': `${disposition}; filename="${asset.filename}"`,
+        },
+        body: fileContent,
+      };
+    } catch (e) {
+      console.error('Error serving file:', e);
+      return { statusCode: 500, contentType: 'text/plain', body: 'Error reading file' };
+    }
+  };
+
+  const setupRoutes = useCallback(() => {
     // Index page
-    server.route('/', 'GET', async () => {
+    route('/', 'GET', async () => {
       const html = generateFileListHTML(assetsRef.current);
       return { statusCode: 200, contentType: 'text/html', body: html };
     });
 
     // Serve file by index
-    server.route('/file/:index', 'GET', async (request) => {
-      try {
-        const index = parseInt(request.params?.index || '0');
-        const asset = assetsRef.current[index];
-        if (!asset) {
-          return { statusCode: 404, contentType: 'text/plain', body: 'File not found' };
-        }
-
-        const assetInfo = await MediaLibrary.getAssetInfoAsync(asset);
-        const uri = assetInfo.localUri || asset.uri;
-
-        if (!uri) {
-          return { statusCode: 404, contentType: 'text/plain', body: 'File URI not available' };
-        }
-
-        const fileContent = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-
-        return {
-          statusCode: 200,
-          contentType: getMimeType(asset.filename),
-          headers: {
-            'Content-Disposition': `inline; filename="${asset.filename}"`,
-            'Accept-Ranges': 'bytes',
-          },
-          body: fileContent,
-        };
-      } catch (e) {
-        console.error('Error serving file:', e);
-        return { statusCode: 500, contentType: 'text/plain', body: 'Error reading file' };
-      }
-    });
+    route('/file', 'GET', async (request) => serveFile(request, false));
 
     // Download file
-    server.route('/download/:index', 'GET', async (request) => {
-      try {
-        const index = parseInt(request.params?.index || '0');
-        const asset = assetsRef.current[index];
-        if (!asset) {
-          return { statusCode: 404, contentType: 'text/plain', body: 'File not found' };
-        }
-
-        const assetInfo = await MediaLibrary.getAssetInfoAsync(asset);
-        const uri = assetInfo.localUri || asset.uri;
-
-        if (!uri) {
-          return { statusCode: 404, contentType: 'text/plain', body: 'File URI not available' };
-        }
-
-        const fileContent = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-
-        return {
-          statusCode: 200,
-          contentType: 'application/octet-stream',
-          headers: {
-            'Content-Disposition': `attachment; filename="${asset.filename}"`,
-          },
-          body: fileContent,
-        };
-      } catch (e) {
-        return { statusCode: 500, contentType: 'text/plain', body: 'Error reading file' };
-      }
-    });
+    route('/download', 'GET', async (request) => serveFile(request, true));
 
     // Stream page (video/audio player)
-    server.route('/stream/:index', 'GET', async (request) => {
-      const index = parseInt(request.params?.index || '0');
+    route('/stream', 'GET', async (request) => {
+      const index = parseIndex(request);
       const asset = assetsRef.current[index];
       if (!asset) {
         return { statusCode: 404, contentType: 'text/html', body: '<h1>Not found</h1>' };
@@ -292,14 +281,14 @@ ${mediaTag}
   const startServer = async () => {
     try {
       await getIpAddress();
-      server.setup(port, (event: { status: string }) => {
+      setup(port, (event: { status: string }) => {
         console.log(`Server event: ${event.status}`);
         if (event.status === 'ERROR') {
-          Alert.alert('Error', 'Failed to start server. Try restarting the app.');
+          Alert.alert('Error', 'Server error. Try restarting the app.');
         }
       });
       setupRoutes();
-      server.start();
+      start();
       setIsRunning(true);
     } catch (e) {
       console.error('Failed to start server:', e);
@@ -309,7 +298,7 @@ ${mediaTag}
 
   const stopServer = () => {
     try {
-      server.stop();
+      stop();
       setIsRunning(false);
     } catch (e) {
       console.error('Failed to stop server:', e);
