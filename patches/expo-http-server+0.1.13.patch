@@ -1,5 +1,5 @@
 diff --git a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
-index 53ad622..bfc12aa 100644
+index 53ad622..1f0c057 100644
 --- a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
 +++ b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
 @@ -1,5 +1,6 @@
@@ -22,21 +22,19 @@ index 53ad622..bfc12aa 100644
    override fun definition() = ModuleDefinition {
  
      Name("ExpoHttpServer")
-@@ -53,13 +60,28 @@ class ExpoHttpServerModule : Module() {
+@@ -53,13 +60,30 @@ class ExpoHttpServerModule : Module() {
            Thread.sleep(10)
          }
          val res = responses[uuid]!!
 -        response.setBodyText(res.body)
          response.setStatus(res.statusCode)
 -        response.addHeader("Content-Length", "" + res.body.length)
-         response.addHeader("Content-Type", res.contentType)
-         for ((key, value) in res.headers) {
-           response.addHeader(key, value)
-         }
+-        response.addHeader("Content-Type", res.contentType)
 +
 +        if (isTextContentType(res.contentType)) {
 +          response.setBodyText(res.body)
-+          response.addHeader("Content-Length", "" + res.body.length)
++          response.addHeader("Content-Type", res.contentType)
++          response.addHeader("Content-Length", "" + res.body.toByteArray().size)
 +        } else {
 +          // Binary content: decode base64 body to bytes
 +          try {
@@ -46,9 +44,14 @@ index 53ad622..bfc12aa 100644
 +          } catch (e: Exception) {
 +            // Fallback to text if base64 decode fails
 +            response.setBodyText(res.body)
-+            response.addHeader("Content-Length", "" + res.body.length)
++            response.addHeader("Content-Type", res.contentType)
++            response.addHeader("Content-Length", "" + res.body.toByteArray().size)
 +          }
 +        }
++
+         for ((key, value) in res.headers) {
+           response.addHeader(key, value)
+         }
 +
          responses.remove(uuid);
          return@request response
