@@ -12,8 +12,8 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Network from 'expo-network';
-import * as FileSystem from 'expo-file-system';
-import { StorageAccessFramework } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
+import { StorageAccessFramework } from 'expo-file-system/legacy';
 import { setup, start, stop, route } from 'expo-http-server';
 import type { RequestEvent } from 'expo-http-server';
 
