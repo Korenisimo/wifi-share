@@ -1,21 +1,32 @@
 diff --git a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
-index 53ad622..a3c162b 100644
+index 53ad622..45817ed 100644
 --- a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
 +++ b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,7 @@
  package expo.modules.httpserver
  
 +import android.util.Base64
++import android.util.Log
  import androidx.core.os.bundleOf
  import expo.modules.kotlin.modules.Module
  import expo.modules.kotlin.modules.ModuleDefinition
-@@ -9,18 +10,26 @@ import com.safframework.server.core.http.HttpMethod
+@@ -9,17 +11,37 @@ import com.safframework.server.core.http.HttpMethod
  import com.safframework.server.core.http.Request
  import com.safframework.server.core.http.Response
  import org.json.JSONObject
 +import java.io.File
++import java.util.UUID
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
  
  class ExpoHttpServerModule : Module() {
++  companion object {
++    private const val TAG = "ExpoHttpServer"
++    private const val RESPONSE_TIMEOUT_MS = 60000L // 60 second timeout for large file copies
++    private const val MAX_IN_MEMORY_SIZE = 100L * 1024 * 1024 // 100MB cap for in-memory reads
++  }
++
    class SimpleHttpResponse(val statusCode: Int,
                             val statusDescription: String,
                             val contentType: String,
@@ -26,34 +37,105 @@ index 53ad622..a3c162b 100644
  
    private var server: Server? = null;
    private var started = false;
-   private val responses = HashMap<String, SimpleHttpResponse>()
- 
+-  private val responses = HashMap<String, SimpleHttpResponse>()
++  // ConcurrentHashMap for thread safety — multiple Netty threads may access simultaneously
++  private val responses = ConcurrentHashMap<String, SimpleHttpResponse>()
++  private val latches = ConcurrentHashMap<String, CountDownLatch>()
++
 +  private fun isTextContentType(contentType: String): Boolean {
 +    return contentType.startsWith("text/") ||
 +           contentType == "application/json" ||
 +           contentType == "application/xml"
 +  }
-+
+ 
    override fun definition() = ModuleDefinition {
  
-     Name("ExpoHttpServer")
-@@ -53,13 +62,41 @@ class ExpoHttpServerModule : Module() {
-           Thread.sleep(10)
+@@ -37,11 +59,18 @@ class ExpoHttpServerModule : Module() {
+ 
+     Function("route") { path: String, method: String, uuid: String ->
+       server = server?.request(HttpMethod.getMethod(method), path) { request: Request, response: Response ->
++        // Per-request ID prevents concurrent request collisions on the same route
++        val requestId = UUID.randomUUID().toString()
++        val latch = CountDownLatch(1)
++        latches[requestId] = latch
++
+         val headers: Map<String, String> = request.headers()
+         val params: Map<String, String> = request.params()
+         val cookies: Map<String, String> = request.cookies().associate { it.name() to it.value() }
++
+         sendEvent("onRequest", bundleOf(
+           "uuid" to uuid,
++          "requestId" to requestId,
+           "method" to request.method().name,
+           "path" to request.url(),
+           "body" to request.content(),
+@@ -49,18 +78,88 @@ class ExpoHttpServerModule : Module() {
+           "paramsJson" to JSONObject(params).toString(),
+           "cookiesJson" to JSONObject(cookies).toString(),
+         ))
+-        while (!responses.containsKey(uuid)) {
+-          Thread.sleep(10)
++
++        // CountDownLatch instead of Thread.sleep polling — much more efficient
++        val responded = latch.await(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
++        latches.remove(requestId)
++
++        if (!responded) {
++          Log.e(TAG, "Request timed out after ${RESPONSE_TIMEOUT_MS}ms: $path")
++          response.setStatus(504)
++          response.setBodyText("Gateway Timeout")
++          response.addHeader("Content-Type", "text/plain")
++          return@request response
++        }
++
++        val res = responses.remove(requestId)
++        if (res == null) {
++          Log.e(TAG, "Response was null for requestId: $requestId")
++          response.setStatus(500)
++          response.setBodyText("Internal Server Error")
++          response.addHeader("Content-Type", "text/plain")
++          return@request response
          }
-         val res = responses[uuid]!!
+-        val res = responses[uuid]!!
 -        response.setBodyText(res.body)
++
          response.setStatus(res.statusCode)
 -        response.addHeader("Content-Length", "" + res.body.length)
 -        response.addHeader("Content-Type", res.contentType)
 +
 +        if (res.filePath != null) {
-+          // Serve file directly from disk — no JS bridge needed
++          // Serve file directly from disk
 +          try {
 +            val file = File(res.filePath)
++            if (!file.exists()) {
++              response.setStatus(404)
++              response.setBodyText("File not found")
++              response.addHeader("Content-Type", "text/plain")
++              return@request response
++            }
++
++            val fileSize = file.length()
++            if (fileSize > MAX_IN_MEMORY_SIZE) {
++              Log.e(TAG, "File too large for in-memory serving: ${fileSize} bytes (${file.name})")
++              response.setStatus(413)
++              response.setBodyText("File too large")
++              response.addHeader("Content-Type", "text/plain")
++              return@request response
++            }
++
++            Log.d(TAG, "Serving file: ${file.name} (${fileSize} bytes)")
 +            val bytes = file.readBytes()
 +            response.setBodyData(res.contentType, bytes)
 +            response.addHeader("Content-Length", "" + bytes.size)
++          } catch (e: OutOfMemoryError) {
++            Log.e(TAG, "OOM reading file: ${res.filePath}", e)
++            // Force GC and return error
++            System.gc()
++            response.setStatus(507)
++            response.setBodyText("File too large to serve")
++            response.addHeader("Content-Type", "text/plain")
 +          } catch (e: Exception) {
++            Log.e(TAG, "Error reading file: ${res.filePath}", e)
 +            response.setStatus(500)
 +            response.setBodyText("Error reading file: " + e.message)
 +            response.addHeader("Content-Type", "text/plain")
@@ -78,14 +160,18 @@ index 53ad622..a3c162b 100644
          for ((key, value) in res.headers) {
            response.addHeader(key, value)
          }
+-        responses.remove(uuid);
 +
-         responses.remove(uuid);
          return@request response
        };
-@@ -92,6 +129,15 @@ class ExpoHttpServerModule : Module() {
-       responses[uuid] = SimpleHttpResponse(statusCode, statusDescription, contentType, headers, body);
      }
- 
+@@ -90,11 +189,25 @@ class ExpoHttpServerModule : Module() {
+                           headers: HashMap<String, String>,
+                           body: String ->
+       responses[uuid] = SimpleHttpResponse(statusCode, statusDescription, contentType, headers, body);
++      latches[uuid]?.countDown()
++    }
++
 +    // Respond with a file path — native reads the file directly, no JS bridge
 +    Function("respondWithFile") { uuid: String,
 +                                   statusCode: Int,
@@ -93,16 +179,31 @@ index 53ad622..a3c162b 100644
 +                                   headers: HashMap<String, String>,
 +                                   filePath: String ->
 +      responses[uuid] = SimpleHttpResponse(statusCode, "OK", contentType, headers, "", filePath);
-+    }
-+
++      latches[uuid]?.countDown()
+     }
+ 
      Function("stop") {
        started = false
        server?.close()
++      latches.values.forEach { it.countDown() } // Unblock any waiting requests
++      latches.clear()
++      responses.clear()
+       sendEvent("onStatusUpdate", bundleOf(
+         "status" to "STOPPED",
+         "message" to "Server stopped"
 diff --git a/node_modules/expo-http-server/src/index.ts b/node_modules/expo-http-server/src/index.ts
-index da15689..8270220 100644
+index da15689..437f233 100644
 --- a/node_modules/expo-http-server/src/index.ts
 +++ b/node_modules/expo-http-server/src/index.ts
-@@ -32,6 +32,7 @@ export interface Response {
+@@ -18,6 +18,7 @@ export interface StatusEvent {
+ 
+ export interface RequestEvent {
+   uuid: string;
++  requestId?: string;
+   method: string;
+   path: string;
+   body: string;
+@@ -32,6 +33,7 @@ export interface Response {
    contentType?: string;
    headers?: Record<string, string>;
    body?: string;
@@ -110,10 +211,27 @@ index da15689..8270220 100644
  }
  
  export interface Callback {
-@@ -56,14 +57,24 @@ export const start = () => {
+@@ -43,10 +45,14 @@ export interface Callback {
+ 
+ export const start = () => {
+   emitter.addListener<RequestEvent>("onRequest", async (event) => {
++    // Use uuid to find the route handler, requestId to respond
+     const responseHandler = requestCallbacks.find((c) => c.uuid === event.uuid);
++    // Use per-request ID if available, fall back to route uuid for backwards compat
++    const responseId = event.requestId || event.uuid;
++
+     if (!responseHandler) {
+       ExpoHttpServerModule.respond(
+-        event.uuid,
++        responseId,
+         404,
+         "Not Found",
+         "application/json",
+@@ -55,15 +61,37 @@ export const start = () => {
+       );
        return;
      }
-     const response = await responseHandler.callback(event);
+-    const response = await responseHandler.callback(event);
 -    ExpoHttpServerModule.respond(
 -      event.uuid,
 -      response.statusCode || 200,
@@ -122,22 +240,35 @@ index da15689..8270220 100644
 -      response.headers || {},
 -      response.body || "{}",
 -    );
-+    if (response.filePath) {
-+      ExpoHttpServerModule.respondWithFile(
-+        event.uuid,
-+        response.statusCode || 200,
-+        response.contentType || "application/octet-stream",
-+        response.headers || {},
-+        response.filePath,
-+      );
-+    } else {
++    try {
++      const response = await responseHandler.callback(event);
++      if (response.filePath) {
++        ExpoHttpServerModule.respondWithFile(
++          responseId,
++          response.statusCode || 200,
++          response.contentType || "application/octet-stream",
++          response.headers || {},
++          response.filePath,
++        );
++      } else {
++        ExpoHttpServerModule.respond(
++          responseId,
++          response.statusCode || 200,
++          response.statusDescription || "OK",
++          response.contentType || "application/json",
++          response.headers || {},
++          response.body || "{}",
++        );
++      }
++    } catch (error) {
++      console.error(`[ExpoHttpServer] Handler error for ${event.path}:`, error);
 +      ExpoHttpServerModule.respond(
-+        event.uuid,
-+        response.statusCode || 200,
-+        response.statusDescription || "OK",
-+        response.contentType || "application/json",
-+        response.headers || {},
-+        response.body || "{}",
++        responseId,
++        500,
++        "Internal Server Error",
++        "application/json",
++        {},
++        JSON.stringify({ error: "Handler threw an exception" }),
 +      );
 +    }
    });

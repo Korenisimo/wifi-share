@@ -271,8 +271,12 @@ ${mediaTag}
       }
 
       // Copy SAF content:// URI to cache so native code can read it directly
+      // Skip copy if already cached (avoids redundant I/O for large files)
       const cachePath = FileSystem.cacheDirectory + 'serve_' + file.name;
-      await FileSystem.copyAsync({ from: file.uri, to: cachePath });
+      const cacheInfo = await FileSystem.getInfoAsync(cachePath);
+      if (!cacheInfo.exists || cacheInfo.size !== file.size) {
+        await FileSystem.copyAsync({ from: file.uri, to: cachePath });
+      }
 
       // Strip file:// prefix — native needs a raw filesystem path
       const nativePath = cachePath.replace('file://', '');
