@@ -265,13 +265,33 @@ ${mediaTag}
   const serveFile = async (request: RequestEvent, asDownload: boolean) => {
     try {
       const index = parseIndex(request);
+      console.log('[WiFiShare] serveFile called, index:', index, 'asDownload:', asDownload, 'path:', request.path);
       const file = filesRef.current[index];
       if (!file) {
+        console.log('[WiFiShare] File not found at index:', index, 'total files:', filesRef.current.length);
         return { statusCode: 404, contentType: 'text/plain', body: 'File not found' };
       }
 
-      // Pass the SAF content:// URI directly to native — it reads via ContentResolver
-      // No JS file copy needed
+      console.log('[WiFiShare] Serving:', file.name, 'size:', file.size, 'uri:', file.uri.substring(0, 80));
+
+      // Copy SAF content:// URI to cache so native code can read it directly
+      // Skip copy if already cached (avoids redundant I/O for large files)
+      const cachePath = FileSystem.cacheDirectory + 'serve_' + file.name;
+      console.log('[WiFiShare] Cache path:', cachePath);
+      const cacheInfo = await FileSystem.getInfoAsync(cachePath);
+      console.log('[WiFiShare] Cache info:', JSON.stringify(cacheInfo));
+      if (!cacheInfo.exists || (cacheInfo.exists && cacheInfo.size !== file.size)) {
+        console.log('[WiFiShare] Copying file to cache...');
+        await FileSystem.copyAsync({ from: file.uri, to: cachePath });
+        console.log('[WiFiShare] Copy complete');
+      } else {
+        console.log('[WiFiShare] Using cached file');
+      }
+
+      // Strip file:// prefix — native needs a raw filesystem path
+      const nativePath = cachePath.replace('file://', '');
+      console.log('[WiFiShare] Native path:', nativePath);
+
       const disposition = asDownload ? 'attachment' : 'inline';
       const contentType = asDownload ? 'application/octet-stream' : getMimeType(file.name);
 
@@ -281,11 +301,11 @@ ${mediaTag}
         headers: {
           'Content-Disposition': `${disposition}; filename="${file.name}"`,
         },
-        filePath: file.uri,
+        filePath: nativePath,
       };
     } catch (e) {
       console.error('Error serving file:', e);
-      return { statusCode: 500, contentType: 'text/plain', body: 'Error: ' + (e as Error).message };
+      return { statusCode: 500, contentType: 'text/plain', body: 'Error reading file: ' + (e as Error).message };
     }
   };
 
