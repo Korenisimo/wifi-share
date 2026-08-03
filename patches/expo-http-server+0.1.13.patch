@@ -1,21 +1,21 @@
 diff --git a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
-index 53ad622..6020ef7 100644
+index 53ad622..c6c51d3 100644
 --- a/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
 +++ b/node_modules/expo-http-server/android/src/main/java/expo/modules/httpserver/ExpoHttpServerModule.kt
-@@ -1,5 +1,7 @@
+@@ -1,5 +1,8 @@
  package expo.modules.httpserver
  
++import android.net.Uri
 +import android.util.Base64
 +import android.util.Log
  import androidx.core.os.bundleOf
  import expo.modules.kotlin.modules.Module
  import expo.modules.kotlin.modules.ModuleDefinition
-@@ -9,17 +11,36 @@ import com.safframework.server.core.http.HttpMethod
+@@ -9,17 +12,56 @@ import com.safframework.server.core.http.HttpMethod
  import com.safframework.server.core.http.Request
  import com.safframework.server.core.http.Response
  import org.json.JSONObject
 +import java.io.File
-+import java.io.RandomAccessFile
 +import java.util.UUID
 +import java.util.concurrent.ConcurrentHashMap
 +import java.util.concurrent.CountDownLatch
@@ -46,10 +46,31 @@ index 53ad622..6020ef7 100644
 +           contentType == "application/json" ||
 +           contentType == "application/xml"
 +  }
++
++  /**
++   * Read bytes from either a content:// URI or a file:// / absolute path.
++   * Uses ContentResolver for content:// URIs, direct File read for filesystem paths.
++   */
++  private fun readFileBytes(pathOrUri: String): ByteArray {
++    if (pathOrUri.startsWith("content://")) {
++      // SAF content URI — use ContentResolver
++      val context = appContext.reactContext ?: throw Exception("No React context")
++      val uri = Uri.parse(pathOrUri)
++      val inputStream = context.contentResolver.openInputStream(uri)
++        ?: throw Exception("Cannot open content URI: $pathOrUri")
++      return inputStream.use { it.readBytes() }
++    } else {
++      // Regular file path
++      val path = if (pathOrUri.startsWith("file://")) pathOrUri.removePrefix("file://") else pathOrUri
++      val file = File(path)
++      if (!file.exists()) throw java.io.FileNotFoundException("File not found: $path")
++      return file.readBytes()
++    }
++  }
  
    override fun definition() = ModuleDefinition {
  
-@@ -37,11 +58,17 @@ class ExpoHttpServerModule : Module() {
+@@ -37,11 +79,17 @@ class ExpoHttpServerModule : Module() {
  
      Function("route") { path: String, method: String, uuid: String ->
        server = server?.request(HttpMethod.getMethod(method), path) { request: Request, response: Response ->
@@ -67,28 +88,26 @@ index 53ad622..6020ef7 100644
            "method" to request.method().name,
            "path" to request.url(),
            "body" to request.content(),
-@@ -49,18 +76,81 @@ class ExpoHttpServerModule : Module() {
+@@ -49,18 +97,68 @@ class ExpoHttpServerModule : Module() {
            "paramsJson" to JSONObject(params).toString(),
            "cookiesJson" to JSONObject(cookies).toString(),
          ))
 -        while (!responses.containsKey(uuid)) {
 -          Thread.sleep(10)
 +
-+        // Wait for JS to respond — uses CountDownLatch (efficient, no CPU spin)
 +        val responded = latch.await(RESPONSE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
 +        latches.remove(requestId)
 +
 +        if (!responded) {
-+          Log.e(TAG, "Timeout waiting for JS response: $path (requestId=$requestId)")
++          Log.e(TAG, "Timeout: $path (requestId=$requestId)")
 +          response.setStatus(504)
-+          response.setBodyText("Gateway Timeout — handler did not respond within ${RESPONSE_TIMEOUT_MS/1000}s")
++          response.setBodyText("Gateway Timeout")
 +          response.addHeader("Content-Type", "text/plain")
 +          return@request response
 +        }
 +
 +        val res = responses.remove(requestId)
 +        if (res == null) {
-+          Log.e(TAG, "Response was null for requestId=$requestId")
 +          response.setStatus(500)
 +          response.setBodyText("Internal Server Error")
 +          response.addHeader("Content-Type", "text/plain")
@@ -102,32 +121,21 @@ index 53ad622..6020ef7 100644
 -        response.addHeader("Content-Type", res.contentType)
 +
 +        if (res.filePath != null) {
-+          // === FILE SERVING ===
 +          try {
-+            val file = File(res.filePath)
-+            if (!file.exists()) {
-+              Log.e(TAG, "File not found: ${res.filePath}")
-+              response.setStatus(404)
-+              response.setBodyText("File not found: ${file.name}")
-+              response.addHeader("Content-Type", "text/plain")
-+              return@request response
-+            }
-+
-+            val fileSize = file.length()
-+            Log.i(TAG, "Serving file: ${file.name} ($fileSize bytes, ${res.contentType})")
-+
-+            val bytes = file.readBytes()
++            Log.i(TAG, "Serving: ${res.filePath}")
++            val bytes = readFileBytes(res.filePath)
++            Log.i(TAG, "Read ${bytes.size} bytes")
 +            response.setBodyData(res.contentType, bytes)
-+            response.addHeader("Content-Length", fileSize.toString())
++            response.addHeader("Content-Length", bytes.size.toString())
 +          } catch (e: OutOfMemoryError) {
-+            Log.e(TAG, "OOM serving file: ${res.filePath}", e)
++            Log.e(TAG, "OOM: ${res.filePath}", e)
 +            System.gc()
 +            response.setStatus(507)
-+            response.setBodyText("File too large to serve in memory")
++            response.setBodyText("File too large")
 +            response.addHeader("Content-Type", "text/plain")
 +            return@request response
 +          } catch (e: Exception) {
-+            Log.e(TAG, "Error serving file: ${res.filePath}", e)
++            Log.e(TAG, "Error: ${res.filePath}: ${e.message}", e)
 +            response.setStatus(500)
 +            response.setBodyText("Error: ${e.message}")
 +            response.addHeader("Content-Type", "text/plain")
@@ -156,11 +164,9 @@ index 53ad622..6020ef7 100644
          return@request response
        };
      }
-@@ -89,12 +179,27 @@ class ExpoHttpServerModule : Module() {
-                           contentType: String,
+@@ -90,11 +188,24 @@ class ExpoHttpServerModule : Module() {
                            headers: HashMap<String, String>,
                            body: String ->
-+      Log.d(TAG, "respond called for requestId=$uuid, status=$statusCode, contentType=$contentType")
        responses[uuid] = SimpleHttpResponse(statusCode, statusDescription, contentType, headers, body);
 +      latches[uuid]?.countDown()
 +    }
@@ -170,7 +176,6 @@ index 53ad622..6020ef7 100644
 +                                   contentType: String,
 +                                   headers: HashMap<String, String>,
 +                                   filePath: String ->
-+      Log.d(TAG, "respondWithFile called for requestId=$uuid, filePath=$filePath")
 +      responses[uuid] = SimpleHttpResponse(statusCode, "OK", contentType, headers, "", filePath);
 +      latches[uuid]?.countDown()
      }
@@ -185,7 +190,7 @@ index 53ad622..6020ef7 100644
          "status" to "STOPPED",
          "message" to "Server stopped"
 diff --git a/node_modules/expo-http-server/src/index.ts b/node_modules/expo-http-server/src/index.ts
-index da15689..0e5f6e2 100644
+index da15689..bd15900 100644
 --- a/node_modules/expo-http-server/src/index.ts
 +++ b/node_modules/expo-http-server/src/index.ts
 @@ -18,6 +18,7 @@ export interface StatusEvent {
@@ -204,16 +209,11 @@ index da15689..0e5f6e2 100644
  }
  
  export interface Callback {
-@@ -43,10 +45,16 @@ export interface Callback {
- 
+@@ -44,9 +46,11 @@ export interface Callback {
  export const start = () => {
    emitter.addListener<RequestEvent>("onRequest", async (event) => {
-+    console.log(`[ExpoHttpServer] onRequest: path=${event.path} uuid=${event.uuid} requestId=${event.requestId}`);
-+    // Use uuid to find the route handler, requestId to respond
      const responseHandler = requestCallbacks.find((c) => c.uuid === event.uuid);
-+    // Use per-request ID if available, fall back to route uuid for backwards compat
 +    const responseId = event.requestId || event.uuid;
-+    console.log(`[ExpoHttpServer] responseId=${responseId} handlerFound=${!!responseHandler}`);
 +
      if (!responseHandler) {
        ExpoHttpServerModule.respond(
@@ -222,7 +222,7 @@ index da15689..0e5f6e2 100644
          404,
          "Not Found",
          "application/json",
-@@ -55,15 +63,40 @@ export const start = () => {
+@@ -55,15 +59,37 @@ export const start = () => {
        );
        return;
      }
@@ -236,11 +236,8 @@ index da15689..0e5f6e2 100644
 -      response.body || "{}",
 -    );
 +    try {
-+      console.log(`[ExpoHttpServer] Calling handler for ${event.path}...`);
 +      const response = await responseHandler.callback(event);
-+      console.log(`[ExpoHttpServer] Handler returned: status=${response.statusCode} filePath=${response.filePath || 'none'} bodyLen=${response.body?.length || 0}`);
 +      if (response.filePath) {
-+        console.log(`[ExpoHttpServer] Calling respondWithFile: ${response.filePath}`);
 +        ExpoHttpServerModule.respondWithFile(
 +          responseId,
 +          response.statusCode || 200,
@@ -264,9 +261,9 @@ index da15689..0e5f6e2 100644
 +        responseId,
 +        500,
 +        "Internal Server Error",
-+        "application/json",
++        "text/plain",
 +        {},
-+        JSON.stringify({ error: "Handler threw an exception" }),
++        "Internal Server Error",
 +      );
 +    }
    });
