@@ -9,6 +9,12 @@ A simple Android app that turns your phone into a WiFi file server. Share and st
 3. Open the displayed URL on any device (laptop, tablet, another phone)
 4. Browse, stream, and download your files
 
+## Requirements
+
+- Android minimum SDK / target: as set by the Expo SDK version in package.json (`expo: ~57.0.9`) — app.json does not declare them explicitly
+- Expo SDK: `~57.0.9` (from `dependencies.expo` in package.json)
+- Both devices must be on the same Wi-Fi network
+
 ## Features
 
 - 🎬 Stream videos directly in the browser
